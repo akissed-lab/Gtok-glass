@@ -1,0 +1,9 @@
+Package: com.gtok.glass
+Name: GTokGlass
+Version: 0.1
+Architecture: iphoneos-arm64
+Description: Native Liquid Glass unlock for TikTok (iOS 26/27) on top of GTok
+Maintainer: you
+Author: you
+Section: Tweaks
+Depends: mobilesubstrate
