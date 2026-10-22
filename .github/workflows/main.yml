@@ -1,0 +1,43 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  dylib:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid xz
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Fetch iOS SDK (sparse)
+        run: |
+          mkdir -p "$HOME/theos/sdks"
+          cd "$HOME/theos/sdks"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git sdk-tmp
+          cd sdk-tmp
+          git sparse-checkout set iPhoneOS16.5.sdk
+          mv iPhoneOS16.5.sdk "$HOME/theos/sdks/"
+          cd "$HOME/theos/sdks"
+          rm -rf sdk-tmp
+          ls -1
+
+      - name: Build
+        run: |
+          make -j4
+          find .theos -name '*.dylib' -print
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GTokGlass-dylib
+          path: |
+            .theos/obj/**/*.dylib
+            .theos/obj/*.dylib
+          if-no-files-found: error
