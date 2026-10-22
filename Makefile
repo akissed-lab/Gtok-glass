@@ -4,7 +4,7 @@ INSTALL_TARGET_PROCESSES = TikTok
 
 TWEAK_NAME = GTokGlass
 GTokGlass_FILES = Tweak.m
-GTokGlass_CFLAGS = -fobjc-arc -O2 -Wall
+GTokGlass_CFLAGS = -fobjc-arc -O2 -Wall -Wno-unused-function
 GTokGlass_FRAMEWORKS = Foundation UIKit
 GTokGlass_LDFLAGS = -install_name @executable_path/Frameworks/GTokGlass.dylib
 
