@@ -472,6 +472,72 @@ static UIColor *GGCapsuleTintColor(void) {
     }];
 }
 
+static const void *kGGCapBarKey = &kGGCapBarKey;
+static const void *kGGCapLensKey = &kGGCapLensKey;
+static const void *kGGCapWatchedKey = &kGGCapWatchedKey;
+
+// Moves the "liquid droplet" to the tapped item with a spring and leaves a
+// short splash behind, mimicking the iOS 26 liquid lens.
+@interface GGTabBarWatcher : NSObject
+@end
+
+@implementation GGTabBarWatcher
+
+- (void)tabTapped:(UIControl *)sender {
+    UIView *lens = objc_getAssociatedObject(sender, kGGCapLensKey);
+    if (!lens || !lens.superview) return;
+
+    UIView *host = lens.superview;
+    CGRect target = [sender convertRect:sender.bounds toView:host];
+    target = CGRectInset(target, 6.0, 4.0);
+    if (target.size.width < 8.0 || target.size.height < 8.0) return;
+
+    [UIView animateWithDuration:0.50
+                          delay:0.0
+         usingSpringWithDamping:0.62
+          initialSpringVelocity:0.9
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        lens.frame = target;
+        lens.transform = CGAffineTransformMakeScale(1.07, 1.07);
+    } completion:^(__unused BOOL finished) {
+        [UIView animateWithDuration:0.18 animations:^{
+            lens.transform = CGAffineTransformIdentity;
+        }];
+    }];
+
+    UIView *splash = [[UIView alloc] initWithFrame:CGRectInset(target,
+                                                               target.size.width * 0.30,
+                                                               target.size.height * 0.30)];
+    splash.userInteractionEnabled = NO;
+    splash.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.30];
+    splash.layer.cornerRadius = splash.bounds.size.height / 2.0;
+    [host insertSubview:splash belowSubview:lens];
+    [UIView animateWithDuration:0.55 delay:0.0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        splash.transform = CGAffineTransformMakeScale(2.0, 2.0);
+        splash.alpha = 0.0;
+    } completion:^(__unused BOOL finished) {
+        [splash removeFromSuperview];
+    }];
+}
+
+@end
+
+static GGTabBarWatcher *GGTabBarWatcherShared(void) {
+    static GGTabBarWatcher *w = nil;
+    if (!w) w = [GGTabBarWatcher new];
+    return w;
+}
+
+static UIColor *GGDropletColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.16];
+        }
+        return [UIColor colorWithWhite:1.0 alpha:0.55];
+    }];
+}
+
 static void GGApplyTabBarCapsule(UIView *bar) {
     static const void *kShadowKey = &kShadowKey;
     static const void *kCapsuleKey = &kCapsuleKey;
@@ -479,13 +545,22 @@ static void GGApplyTabBarCapsule(UIView *bar) {
     GGSetBarBackgroundHidden(bar);
     bar.backgroundColor = [UIColor clearColor];
 
+    // TikTok keeps a full-width blur band behind its own buttons; without this
+    // the floating capsule looks like a bar glued to the screen edge.
+    for (UIView *s in bar.subviews) {
+        if ([NSStringFromClass([s class]) containsString:@"TTKTabBarBlurView"]) s.hidden = YES;
+    }
+
     CGFloat safeBottom = bar.safeAreaInsets.bottom;
     CGRect b = bar.bounds;
-    CGFloat insetX = 8.0;
-    CGFloat insetY = 2.0;
-    CGFloat h = b.size.height - safeBottom - insetY * 2.0;
-    if (h < 34.0) h = 34.0;
-    CGRect capsuleRect = CGRectMake(insetX, insetY, MAX(0.0, b.size.width - insetX * 2.0), h);
+    CGFloat contentH = b.size.height - safeBottom;
+    if (contentH < 40.0) contentH = 40.0;
+
+    // Match the iOS 26 floating tab bar platter: inset sides, taller than the
+    // bare content area, sitting right above the home indicator.
+    CGFloat insetX = b.size.width > 340.0 ? 21.0 : 12.0;
+    CGFloat h = MAX(contentH, b.size.height - 21.0);
+    CGRect capsuleRect = CGRectMake(insetX, 0.0, MAX(0.0, b.size.width - insetX * 2.0), h);
 
     UIView *shadow = objc_getAssociatedObject(bar, kShadowKey);
     if (![shadow isKindOfClass:[UIView class]]) {
@@ -493,9 +568,9 @@ static void GGApplyTabBarCapsule(UIView *bar) {
         shadow.userInteractionEnabled = NO;
         shadow.backgroundColor = [UIColor clearColor];
         shadow.layer.shadowColor = [UIColor blackColor].CGColor;
-        shadow.layer.shadowOpacity = 0.20;
-        shadow.layer.shadowRadius = 12.0;
-        shadow.layer.shadowOffset = CGSizeMake(0, 4);
+        shadow.layer.shadowOpacity = 0.22;
+        shadow.layer.shadowRadius = 14.0;
+        shadow.layer.shadowOffset = CGSizeMake(0, 5);
         objc_setAssociatedObject(bar, kShadowKey, shadow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
@@ -522,29 +597,77 @@ static void GGApplyTabBarCapsule(UIView *bar) {
     if (shadow.superview != bar) [bar insertSubview:shadow atIndex:0];
     if (capsule.superview != shadow) [shadow addSubview:capsule];
 
+    UIView *lens = objc_getAssociatedObject(bar, kGGCapLensKey);
+    if (![lens isKindOfClass:[UIView class]]) {
+        lens = [[UIView alloc] init];
+        lens.userInteractionEnabled = NO;
+        lens.backgroundColor = GGDropletColor();
+        lens.layer.cornerCurve = kCACornerCurveContinuous;
+        objc_setAssociatedObject(bar, kGGCapLensKey, lens, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (lens.superview != bar) [bar insertSubview:lens aboveSubview:shadow];
+
     // distribute the tab items inside the capsule so nothing sits outside it
     NSArray *buttons = nil;
     @try { buttons = [bar valueForKey:@"buttons"]; } @catch (__unused NSException *e) {}
+    UIControl *selectedButton = nil;
     if ([buttons isKindOfClass:[NSArray class]] && buttons.count > 0) {
         CGFloat bw = capsuleRect.size.width / (CGFloat)buttons.count;
+        CGFloat btnH = MIN(45.0, capsuleRect.size.height);
+        CGFloat btnY = capsuleRect.origin.y + (capsuleRect.size.height - btnH) / 2.0;
         for (NSUInteger i = 0; i < buttons.count; i++) {
             id item = buttons[i];
             if (![item isKindOfClass:[UIView class]]) continue;
             UIView *btn = (UIView *)item;
             UIView *host = btn.superview ?: bar;
             CGRect slot = [bar convertRect:CGRectMake(capsuleRect.origin.x + bw * (CGFloat)i,
-                                                      capsuleRect.origin.y,
+                                                      btnY,
                                                       bw,
-                                                      capsuleRect.size.height)
+                                                      btnH)
                                     toView:host];
-            CGRect f = btn.frame;
-            f.origin.x = slot.origin.x;
-            f.origin.y = slot.origin.y;
-            f.size.width = slot.size.width;
-            f.size.height = slot.size.height;
-            btn.frame = f;
+            btn.frame = slot;
+            if ([btn isKindOfClass:[UIControl class]] && ((UIControl *)btn).selected) {
+                selectedButton = (UIControl *)btn;
+            }
+            if (!objc_getAssociatedObject(btn, kGGCapWatchedKey)) {
+                objc_setAssociatedObject(btn, kGGCapWatchedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(btn, kGGCapLensKey, lens, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if ([btn isKindOfClass:[UIControl class]]) {
+                    [(UIControl *)btn addTarget:GGTabBarWatcherShared()
+                                         action:@selector(tabTapped:)
+                               forControlEvents:UIControlEventTouchUpInside];
+                }
+            }
         }
     }
+
+    // place the droplet on the selected item unless it is currently animating
+    if (lens.layer.animationKeys.count == 0) {
+        UIControl *anchor = selectedButton;
+        if (!anchor && [buttons isKindOfClass:[NSArray class]] && buttons.count > 0) {
+            for (id item in buttons) {
+                if ([item isKindOfClass:[UIControl class]] && ((UIControl *)item).selected) { anchor = item; break; }
+            }
+        }
+        if (anchor) {
+            CGRect target = [anchor convertRect:anchor.bounds toView:bar];
+            target = CGRectInset(target, 6.0, 4.0);
+            if (target.size.height < 8.0) {
+                target = CGRectMake(target.origin.x,
+                                    capsuleRect.origin.y + 4.0,
+                                    target.size.width,
+                                    capsuleRect.size.height - 8.0);
+            }
+            lens.frame = target;
+        } else {
+            CGFloat lw = capsuleRect.size.width / MAX(1.0, (CGFloat)buttons.count) - 12.0;
+            lens.frame = CGRectMake(capsuleRect.origin.x + 6.0,
+                                    capsuleRect.origin.y + 4.0,
+                                    lw,
+                                    capsuleRect.size.height - 8.0);
+        }
+    }
+    lens.layer.cornerRadius = lens.frame.size.height / 2.0;
 }
 
 static void GGReplacementTabBarLayout(id self, SEL _cmd) {
@@ -584,37 +707,61 @@ static void GGSetupTabBarGlass(void) {
 
 #pragma mark - universal glass skin (v0.4)
 
-// A small rule table: any view whose class name ends with `cls` gets a glass
-// plate behind its content. radius < 0 means "pill" (height / 2).
+// A small rule table. Any view whose class name ends with `cls` gets decorated.
+// Insets are asymmetric; negative values expand the glass beyond the view.
+// radius < 0 means "pill" (height / 2); ring == YES draws a glass rim instead.
 typedef struct {
     const char *cls;
-    CGFloat insetX;
-    CGFloat insetY;
+    CGFloat left, top, right, bottom;
     CGFloat radius;
     BOOL clearBackground;
+    BOOL ring;
 } GGSkinRule;
 
 static GGSkinRule gSkinRules[] = {
-    // top feed tabs ("For You" / "Following" / ...)
-    {"TikTokFeedTabControl",           8.0, 2.0, -1.0, YES},
+    // top feed tabs ("For You" / "Following" / ...). The labels actually span
+    // 22..340 while the control is 48..342, so the plate must grow to the left.
+    {"TikTokFeedTabControl",          -26.0,  0.0,  0.0, 0.0, -1.0, YES, NO},
     // messages: filter tab bar
-    {"TTKInboxTabBarView",             8.0, 4.0, -1.0, YES},
+    {"TTKInboxTabBarView",              8.0,  4.0,  8.0, 4.0, -1.0, YES, NO},
     // profile tabs (videos / reposts / likes)
-    {"TTKProfileTabBarView",           8.0, 4.0, -1.0, YES},
+    {"TTKProfileTabBarView",            8.0,  4.0,  8.0, 4.0, -1.0, YES, NO},
     // comment sheet tabs
-    {"TTKCommentHeaderTabView",        8.0, 2.0, -1.0, YES},
+    {"TTKCommentHeaderTabView",         8.0,  2.0,  8.0, 2.0, -1.0, YES, NO},
     // one chat row in the inbox
-    {"AWEIMChatListCellContainerView", 0.0, 0.0, 18.0, NO},
-    // search entry points
-    {"TTKFeedDetailSearchButton",      0.0, 0.0, -1.0, NO},
-    {"TTKFeedTabCornerSearchItem",     0.0, 0.0, -1.0, NO},
-    {"TTKFeedTabCornerSearchBarItem",  0.0, 0.0, -1.0, NO},
-    {"AWECommonSearchBar",             2.0, 2.0, -1.0, NO},
-    {"AWESearchBar",                   2.0, 2.0, -1.0, NO},
+    {"AWEIMChatListCellContainerView",  0.0,  0.0,  0.0, 0.0, 18.0, NO,  NO},
+    // search + LIVE buttons in the feed corner (40x40 containers, round icons inside)
+    {"TTKFeedTabCornerItemView",        0.0,  0.0,  0.0, 0.0, -1.0, NO,  NO},
+    // other search entry points
+    {"TTKFeedDetailSearchButton",       0.0,  0.0,  0.0, 0.0, -1.0, NO,  NO},
+    {"AWECommonSearchBar",              2.0,  2.0,  2.0, 2.0, -1.0, NO,  NO},
+    {"AWESearchBar",                    2.0,  2.0,  2.0, 2.0, -1.0, NO,  NO},
+    // glass rim around avatars (feed / profile / comments / inbox)
+    {"AWEPlayInteractionAuthorView",    0.0,  0.0,  0.0, 0.0,  0.0, NO,  YES},
+    {"TUXAvatar",                       0.0,  0.0,  0.0, 0.0,  0.0, NO,  YES},
 };
 
 static const void *kGGSkinGlassKey = &kGGSkinGlassKey;
+static const void *kGGSkinRingKey = &kGGSkinRingKey;
 static BOOL gGlassSkin = NO;
+
+static UIColor *GGRingBorderColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.55];
+        }
+        return [UIColor colorWithWhite:0.0 alpha:0.10];
+    }];
+}
+
+static UIColor *GGRingShadowColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.35];
+        }
+        return [UIColor colorWithWhite:0.0 alpha:0.12];
+    }];
+}
 
 static const GGSkinRule *GGRuleForView(UIView *v) {
     NSString *name = NSStringFromClass([v class]);
@@ -638,6 +785,29 @@ static void GGApplySkinToView(UIView *v) {
 
     if (rule->clearBackground) v.backgroundColor = [UIColor clearColor];
 
+    if (rule->ring) {
+        UIView *ring = objc_getAssociatedObject(v, kGGSkinRingKey);
+        if (![ring isKindOfClass:[UIView class]]) {
+            ring = [[UIView alloc] init];
+            ring.userInteractionEnabled = NO;
+            ring.backgroundColor = [UIColor clearColor];
+            ring.layer.cornerCurve = kCACornerCurveContinuous;
+            ring.layer.borderWidth = 1.5;
+            ring.layer.shadowOffset = CGSizeZero;
+            ring.layer.shadowOpacity = 0.45;
+            ring.layer.shadowRadius = 4.0;
+            objc_setAssociatedObject(v, kGGSkinRingKey, ring, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        ring.frame = b;
+        CGFloat d = MIN(b.size.width, b.size.height);
+        ring.layer.cornerRadius = d / 2.0;
+        ring.layer.borderColor = GGRingBorderColor().CGColor;
+        ring.layer.shadowColor = GGRingShadowColor().CGColor;
+        ring.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:ring.bounds].CGPath;
+        if (ring.superview != v) [v addSubview:ring];
+        return;
+    }
+
     UIVisualEffectView *glass = objc_getAssociatedObject(v, kGGSkinGlassKey);
     if (![glass isKindOfClass:[UIVisualEffectView class]]) {
         glass = [[UIVisualEffectView alloc] initWithEffect:GGGlassEffect()];
@@ -652,7 +822,8 @@ static void GGApplySkinToView(UIView *v) {
         objc_setAssociatedObject(v, kGGSkinGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    CGRect r = CGRectInset(b, rule->insetX, rule->insetY);
+    UIEdgeInsets ins = UIEdgeInsetsMake(rule->top, rule->left, rule->bottom, rule->right);
+    CGRect r = UIEdgeInsetsInsetRect(b, ins);
     if (r.size.width < 4.0 || r.size.height < 4.0) return;
     glass.frame = r;
     glass.layer.cornerRadius = rule->radius < 0.0 ? r.size.height / 2.0 : rule->radius;
@@ -713,6 +884,157 @@ static void GGStartSkinTimer(void) {
         }
     });
     dispatch_resume(gSkinTimer);
+}
+
+#pragma mark - glow on like / favorite / collect
+
+static const void *kGGGlowKey = &kGGGlowKey;
+static NSMutableDictionary<NSString *, NSValue *> *gOrigMap = nil;
+
+@interface GGGlowWatcher : NSObject
+@end
+
+@implementation GGGlowWatcher
+
++ (void)applyGlow:(BOOL)on to:(UIView *)v animated:(BOOL)animated {
+    if (!v) return;
+    UIColor *color = v.tintColor;
+    if (!color || CGColorGetAlpha(color.CGColor) < 0.05) {
+        color = [UIColor colorWithRed:1.0 green:0.17 blue:0.33 alpha:1.0];
+    }
+    CALayer *l = v.layer;
+    l.shadowColor = color.CGColor;
+    l.shadowOffset = CGSizeZero;
+    l.shadowPath = [UIBezierPath bezierPathWithRoundedRect:v.bounds
+                                              cornerRadius:v.bounds.size.height / 2.0].CGPath;
+    if (animated) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+        a.fromValue = @(l.shadowOpacity);
+        a.toValue = @(on ? 0.95 : 0.0);
+        a.duration = 0.25;
+        [l addAnimation:a forKey:@"gg_glow"];
+    }
+    l.shadowOpacity = on ? 0.95f : 0.0f;
+    l.shadowRadius = on ? 13.0 : 6.0;
+
+    if (on && animated) {
+        CAKeyframeAnimation *p = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        p.values = @[@1.0, @1.32, @0.94, @1.0];
+        p.keyTimes = @[@0.0, @0.35, @0.70, @1.0];
+        p.duration = 0.42;
+        [v.layer addAnimation:p forKey:@"gg_pulse"];
+    }
+}
+
+- (void)controlTapped:(UIControl *)sender {
+    __weak UIControl *weakButton = sender;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIControl *btn = weakButton;
+        if (!btn) return;
+        [GGGlowWatcher applyGlow:btn.selected to:btn animated:YES];
+    });
+}
+
+- (void)viewTapped:(UITapGestureRecognizer *)gr {
+    UIView *v = gr.view;
+    if (!v) return;
+    BOOL on = NO;
+    @try { on = [[v valueForKey:@"selected"] boolValue]; } @catch (__unused NSException *e) {}
+    [GGGlowWatcher applyGlow:on to:v animated:YES];
+}
+
+@end
+
+static GGGlowWatcher *GGGlowWatcherShared(void) {
+    static GGGlowWatcher *w = nil;
+    if (!w) w = [GGGlowWatcher new];
+    return w;
+}
+
+static void GGAttachGlow(UIView *v) {
+    if (!v) return;
+    if (objc_getAssociatedObject(v, kGGGlowKey)) return;
+    objc_setAssociatedObject(v, kGGGlowKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    if ([v isKindOfClass:[UIControl class]]) {
+        [(UIControl *)v addTarget:GGGlowWatcherShared()
+                           action:@selector(controlTapped:)
+                 forControlEvents:UIControlEventTouchUpInside];
+    } else {
+        UITapGestureRecognizer *t = [[UITapGestureRecognizer alloc] initWithTarget:GGGlowWatcherShared()
+                                                                           action:@selector(viewTapped:)];
+        t.cancelsTouchesInView = NO;
+        [v addGestureRecognizer:t];
+    }
+
+    BOOL on = NO;
+    @try { on = [[v valueForKey:@"selected"] boolValue]; } @catch (__unused NSException *e) {}
+    [GGGlowWatcher applyGlow:on to:v animated:NO];
+}
+
+static void GGGrabButtonsFromElement(id element) {
+    if (!element) return;
+    for (NSString *key in @[@"likeButton", @"favoriteButton", @"collectButton",
+                            @"diggButton", @"likeView", @"favoriteView"]) {
+        id value = nil;
+        @try { value = [element valueForKey:key]; } @catch (__unused NSException *e) { continue; }
+        if ([value isKindOfClass:[UIView class]]) GGAttachGlow((UIView *)value);
+    }
+}
+
+static IMP GGOrigIMPFor(id self, SEL cmd) {
+    if (!gOrigMap) return NULL;
+    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
+        NSString *key = [NSString stringWithFormat:@"%s::%s", class_getName(c), sel_getName(cmd)];
+        NSValue *value = gOrigMap[key];
+        if (value) return (IMP)value.pointerValue;
+    }
+    return NULL;
+}
+
+static void GGElementHook0(id self, SEL _cmd) {
+    IMP orig = GGOrigIMPFor(self, _cmd);
+    if (orig) ((void (*)(id, SEL))orig)(self, _cmd);
+    @try { GGGrabButtonsFromElement(self); } @catch (__unused NSException *e) {}
+}
+
+static void GGElementHook1(id self, SEL _cmd, id arg) {
+    IMP orig = GGOrigIMPFor(self, _cmd);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, _cmd, arg);
+    @try { GGGrabButtonsFromElement(self); } @catch (__unused NSException *e) {}
+}
+
+static void GGHookClassSel(Class cls, SEL sel, IMP hook) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    NSString *key = [NSString stringWithFormat:@"%s::%s", class_getName(cls), sel_getName(sel)];
+    gOrigMap[key] = [NSValue valueWithPointer:method_getImplementation(m)];
+    method_setImplementation(m, hook);
+}
+
+static void GGHookGlowTargets(void) {
+    if (!gOrigMap) gOrigMap = [NSMutableDictionary dictionary];
+    NSArray *classNames = @[@"AWEPlayInteractionLikeElement",
+                            @"TTKPlayInteractionLikeElement",
+                            @"TTKPlayInteractionFavoriteElement",
+                            @"AWEPlayInteractionFavoriteElement",
+                            @"TTKDetailCollectionCollectButtonViewComponent"];
+    int hooked = 0;
+    for (NSString *name in classNames) {
+        Class cls = NSClassFromString(name);
+        if (!cls) continue;
+        for (NSString *selName in @[@"componentViewDidLoad", @"updateWithModel:", @"bindEvent", @"componentMount"]) {
+            SEL sel = NSSelectorFromString(selName);
+            Method m = class_getInstanceMethod(cls, sel);
+            if (!m) continue;
+            NSUInteger args = method_getNumberOfArguments(m);
+            GGHookClassSel(cls, sel, args >= 3 ? (IMP)GGElementHook1 : (IMP)GGElementHook0);
+            hooked++;
+        }
+        GGLog(@"glow: %@ hooked", name);
+    }
+    GGLog(@"glow: %d methods hooked", hooked);
 }
 
 #pragma mark - hierarchy dump (discovery of unknown Swift classes)
@@ -848,7 +1170,7 @@ static void GGBootstrap(void) {
 
     UIDevice *dev = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    GGLog(@"GTokGlass 0.4 | iOS %@ | %@ | TikTok %@ (%@)",
+    GGLog(@"GTokGlass 0.5 | iOS %@ | %@ | TikTok %@ (%@)",
           dev.systemVersion, dev.model,
           info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]);
     GGLog(@"UIDesignRequiresCompatibility=%@", info[@"UIDesignRequiresCompatibility"] ?: @"<nil>");
@@ -876,6 +1198,7 @@ static void GGBootstrap(void) {
     gGlassSkin = [cfg[@"glassSkin"] boolValue];
     if (gGlassSkin) {
         GGStartSkinTimer();
+        GGHookGlowTargets();
         GGLog(@"glass skin: on (%lu rules)", (unsigned long)(sizeof(gSkinRules) / sizeof(gSkinRules[0])));
     } else {
         GGLog(@"glass skin: off");
@@ -895,8 +1218,8 @@ static void GGBootstrap(void) {
 
     int ok = (NSClassFromString(@"_TtC12TUXSwiftBase14TUXExperiments") != Nil);
     if ([cfg[@"showStatus"] boolValue]) {
-        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.4 | flags %d | ab %d", flags, ab]
-                            : @"GTokGlass 0.4 | class not found";
+        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.5 | flags %d | ab %d", flags, ab]
+                            : @"GTokGlass 0.5 | class not found";
         GGShowStatus(text);
     }
     GGLog(@"done (entries=%d)", gEntCount);
