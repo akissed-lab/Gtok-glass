@@ -417,8 +417,16 @@ static BOOL gTabBarGlass = NO;
 static UIView *(*gOrigTabBarLayout)(id, SEL) = NULL;
 
 static UIVisualEffect *GGGlassEffect(void) {
+    // UIGlassEffect exists since iOS 26. -init alone yields an empty effect on
+    // some builds, so prefer +effectWithStyle: when available.
     Class glass = NSClassFromString(@"UIGlassEffect");
     if (glass) {
+        SEL s = NSSelectorFromString(@"effectWithStyle:");
+        if ([glass respondsToSelector:s]) {
+            id (*fn)(id, SEL, NSInteger) = (void *)objc_msgSend;
+            UIVisualEffect *effect = fn((id)glass, s, 0);
+            if (effect) return effect;
+        }
         UIVisualEffect *effect = [[glass alloc] init];
         if (effect) return effect;
     }
@@ -473,18 +481,29 @@ static void GGShowStatus(NSString *text) {
             }
             if (window) break;
         }
-        if (!window) return;
+        if (!window) {
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (w.isKeyWindow) { window = w; break; }
+                if (!window && w.windowLevel == UIWindowLevelNormal) window = w;
+            }
+        }
+        if (!window) { GGLog(@"capsule: no window"); return; }
+        GGLog(@"capsule: shown in %@", NSStringFromClass([window class]));
 
         UIVisualEffectView *capsule = [[UIVisualEffectView alloc] initWithEffect:GGGlassEffect()];
         capsule.translatesAutoresizingMaskIntoConstraints = NO;
         capsule.layer.cornerRadius = 18;
         capsule.clipsToBounds = YES;
+        // guarantee visibility even if the glass effect renders empty
+        capsule.contentView.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.78];
+        capsule.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+        capsule.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
 
         UILabel *label = [[UILabel alloc] init];
         label.translatesAutoresizingMaskIntoConstraints = NO;
         label.text = text;
         label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        label.textColor = [UIColor labelColor];
+        label.textColor = [UIColor whiteColor];
         [capsule.contentView addSubview:label];
 
         [window addSubview:capsule];
