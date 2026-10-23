@@ -745,6 +745,50 @@ static const void *kGGSkinGlassKey = &kGGSkinGlassKey;
 static const void *kGGSkinRingKey = &kGGSkinRingKey;
 static BOOL gGlassSkin = NO;
 
+// Screens that must stay plain: Messages -> "pick a person" (new chat, create
+// group, share a post, quick share) and the contact list. A view is skipped
+// when it, or any of its ancestors, matches one of these class-name suffixes.
+static NSArray<NSString *> *gSkinSkipScopes = nil;
+
+static NSArray<NSString *> *GGDefaultSkinSkipScopes(void) {
+    return @[@"UserPicker",       // TTKUserPicker* / UserPicker* (new chat, group, mention)
+             @"ShareAvatar",      // AWEIMShareAvatar* (share sheet avatar grid)
+             @"SharePostPicker",  // share a post -> people list
+             @"ShareDMContacts",  // AWEIMMainPostShareDMContactsCell
+             @"IMShareInput",     // IMShareInputCreateGroupView
+             @"ContactList",      // AWEIMContactList* / AWEContactList*
+             @"QuickShare"];      // AWEIMQuickSharePanel*
+}
+
+static BOOL GGNameInSkipScope(NSString *name) {
+    if (name.length == 0) return NO;
+    for (NSString *suffix in gSkinSkipScopes) {
+        if ([suffix isKindOfClass:[NSString class]] && suffix.length > 0 &&
+            [name hasSuffix:suffix]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL GGInSkippedScope(UIView *v) {
+    if (gSkinSkipScopes.count == 0) return NO;
+    NSInteger depth = 0;
+    for (UIView *cur = v; cur && depth < 48; cur = cur.superview, depth++) {
+        if (GGNameInSkipScope(NSStringFromClass([cur class]))) return YES;
+    }
+    return NO;
+}
+
+static void GGClearSkin(UIView *v) {
+    id glass = objc_getAssociatedObject(v, kGGSkinGlassKey);
+    if ([glass isKindOfClass:[UIView class]]) [(UIView *)glass removeFromSuperview];
+    id ring = objc_getAssociatedObject(v, kGGSkinRingKey);
+    if ([ring isKindOfClass:[UIView class]]) [(UIView *)ring removeFromSuperview];
+    objc_setAssociatedObject(v, kGGSkinGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(v, kGGSkinRingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static UIColor *GGRingBorderColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
         if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
@@ -782,6 +826,12 @@ static void GGApplySkinToView(UIView *v) {
 
     const GGSkinRule *rule = GGRuleForView(v);
     if (!rule) return;
+
+    // reused cells can move between screens: drop the skin instead of keeping it
+    if (GGInSkippedScope(v)) {
+        GGClearSkin(v);
+        return;
+    }
 
     if (rule->clearBackground) v.backgroundColor = [UIColor clearColor];
 
@@ -1134,6 +1184,7 @@ static NSDictionary *GGLoadConfig(void) {
                                   @"tabBarGlass": @NO,
                                   @"tabBarCapsule": @YES,
                                   @"glassSkin": @YES,
+                                  @"skipScopes": GGDefaultSkinSkipScopes(),
                                   @"dumpHierarchy": @YES,
                                   @"log": @YES,
                                   @"showStatus": @YES} mutableCopy];
@@ -1170,7 +1221,7 @@ static void GGBootstrap(void) {
 
     UIDevice *dev = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    GGLog(@"GTokGlass 0.5 | iOS %@ | %@ | TikTok %@ (%@)",
+    GGLog(@"GTokGlass 0.6 | iOS %@ | %@ | TikTok %@ (%@)",
           dev.systemVersion, dev.model,
           info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]);
     GGLog(@"UIDesignRequiresCompatibility=%@", info[@"UIDesignRequiresCompatibility"] ?: @"<nil>");
@@ -1196,10 +1247,15 @@ static void GGBootstrap(void) {
     GGSetupTabBarGlass();
 
     gGlassSkin = [cfg[@"glassSkin"] boolValue];
+    gSkinSkipScopes = [cfg[@"skipScopes"] isKindOfClass:[NSArray class]]
+                          ? cfg[@"skipScopes"]
+                          : GGDefaultSkinSkipScopes();
     if (gGlassSkin) {
         GGStartSkinTimer();
         GGHookGlowTargets();
-        GGLog(@"glass skin: on (%lu rules)", (unsigned long)(sizeof(gSkinRules) / sizeof(gSkinRules[0])));
+        GGLog(@"glass skin: on (%lu rules, skip: %@)",
+              (unsigned long)(sizeof(gSkinRules) / sizeof(gSkinRules[0])),
+              [gSkinSkipScopes componentsJoinedByString:@", "]);
     } else {
         GGLog(@"glass skin: off");
     }
@@ -1218,8 +1274,8 @@ static void GGBootstrap(void) {
 
     int ok = (NSClassFromString(@"_TtC12TUXSwiftBase14TUXExperiments") != Nil);
     if ([cfg[@"showStatus"] boolValue]) {
-        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.5 | flags %d | ab %d", flags, ab]
-                            : @"GTokGlass 0.5 | class not found";
+        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.6 | flags %d | ab %d", flags, ab]
+                            : @"GTokGlass 0.6 | class not found";
         GGShowStatus(text);
     }
     GGLog(@"done (entries=%d)", gEntCount);
