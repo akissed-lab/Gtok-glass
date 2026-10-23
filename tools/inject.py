@@ -203,6 +203,27 @@ def main():
             shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
             print('  - removed %s' % junk)
 
+    # nested code signatures are stale after patching the main binary; the
+    # signing app (ESign / Feather) recreates them. Leaving them in place makes
+    # some signers reject or skip the nested bundles.
+    removed = 0
+    for root, dirs, files in os.walk(payload):
+        for d in list(dirs):
+            if d in ('_CodeSignature', 'SC_Info'):
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+                removed += 1
+            elif d == '__MACOSX':
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+                removed += 1
+    macosx = os.path.join(tmp, '__MACOSX')
+    if os.path.isdir(macosx):
+        shutil.rmtree(macosx, ignore_errors=True)
+        removed += 1
+    if removed:
+        print('  - removed %d nested _CodeSignature/SC_Info/__MACOSX dirs' % removed)
+
     print('[*] packing %s' % a.out)
     pack(tmp, a.out)
     if not a.keep_temp:
