@@ -18,6 +18,7 @@
 #import <objc/message.h>
 #import <dispatch/dispatch.h>
 #import <pthread.h>
+#include <sys/time.h>
 
 #pragma mark - config / log
 
@@ -37,14 +38,21 @@ static NSString *GGDir(void) {
 static void GGLogv(NSString *fmt, va_list ap) {
     if (!gLogEnabled) return;
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    NSLog(@"[GTokGlass] %@", line);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm tmv;
+    localtime_r(&tv.tv_sec, &tmv);
+    NSString *stamped = [NSString stringWithFormat:@"%02d:%02d:%02d.%03d %@",
+                         tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                         (int)(tv.tv_usec / 1000), line];
+    NSLog(@"[GTokGlass] %@", stamped);
     if (!gLogPath) return;
     @synchronized (gLogLock) {
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
         if (!fh) return;
         @try {
             [fh seekToEndOfFile];
-            [fh writeData:[([line stringByAppendingString:@"\n"]) dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh writeData:[([stamped stringByAppendingString:@"\n"]) dataUsingEncoding:NSUTF8StringEncoding]];
             [fh closeFile];
         } @catch (__unused NSException *e) {}
     }
@@ -416,6 +424,8 @@ static void GGHookButtonSetup(void) {
 
 static BOOL gTabBarGlass = NO;
 static BOOL gTabBarCapsule = NO;
+static BOOL gTabBarMoveItems = YES;
+static BOOL gTabBarDroplet = YES;
 static UIView *(*gOrigTabBarLayout)(id, SEL) = NULL;
 
 // hides every stock background layer of the tab bar
@@ -597,15 +607,18 @@ static void GGApplyTabBarCapsule(UIView *bar) {
     if (shadow.superview != bar) [bar insertSubview:shadow atIndex:0];
     if (capsule.superview != shadow) [shadow addSubview:capsule];
 
-    UIView *lens = objc_getAssociatedObject(bar, kGGCapLensKey);
-    if (![lens isKindOfClass:[UIView class]]) {
-        lens = [[UIView alloc] init];
-        lens.userInteractionEnabled = NO;
-        lens.backgroundColor = GGDropletColor();
-        lens.layer.cornerCurve = kCACornerCurveContinuous;
-        objc_setAssociatedObject(bar, kGGCapLensKey, lens, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIView *lens = nil;
+    if (gTabBarDroplet) {
+        lens = objc_getAssociatedObject(bar, kGGCapLensKey);
+        if (![lens isKindOfClass:[UIView class]]) {
+            lens = [[UIView alloc] init];
+            lens.userInteractionEnabled = NO;
+            lens.backgroundColor = GGDropletColor();
+            lens.layer.cornerCurve = kCACornerCurveContinuous;
+            objc_setAssociatedObject(bar, kGGCapLensKey, lens, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (lens.superview != bar) [bar insertSubview:lens aboveSubview:shadow];
     }
-    if (lens.superview != bar) [bar insertSubview:lens aboveSubview:shadow];
 
     // distribute the tab items inside the capsule so nothing sits outside it
     NSArray *buttons = nil;
@@ -625,11 +638,11 @@ static void GGApplyTabBarCapsule(UIView *bar) {
                                                       bw,
                                                       btnH)
                                     toView:host];
-            btn.frame = slot;
+            if (gTabBarMoveItems) btn.frame = slot;
             if ([btn isKindOfClass:[UIControl class]] && ((UIControl *)btn).selected) {
                 selectedButton = (UIControl *)btn;
             }
-            if (!objc_getAssociatedObject(btn, kGGCapWatchedKey)) {
+            if (gTabBarDroplet && !objc_getAssociatedObject(btn, kGGCapWatchedKey)) {
                 objc_setAssociatedObject(btn, kGGCapWatchedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 objc_setAssociatedObject(btn, kGGCapLensKey, lens, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 if ([btn isKindOfClass:[UIControl class]]) {
@@ -642,7 +655,7 @@ static void GGApplyTabBarCapsule(UIView *bar) {
     }
 
     // place the droplet on the selected item unless it is currently animating
-    if (lens.layer.animationKeys.count == 0) {
+    if (lens && lens.layer.animationKeys.count == 0) {
         UIControl *anchor = selectedButton;
         if (!anchor && [buttons isKindOfClass:[NSArray class]] && buttons.count > 0) {
             for (id item in buttons) {
@@ -667,7 +680,7 @@ static void GGApplyTabBarCapsule(UIView *bar) {
                                     capsuleRect.size.height - 8.0);
         }
     }
-    lens.layer.cornerRadius = lens.frame.size.height / 2.0;
+    if (lens) lens.layer.cornerRadius = lens.frame.size.height / 2.0;
 }
 
 static void GGReplacementTabBarLayout(id self, SEL _cmd) {
@@ -744,6 +757,8 @@ static GGSkinRule gSkinRules[] = {
 static const void *kGGSkinGlassKey = &kGGSkinGlassKey;
 static const void *kGGSkinRingKey = &kGGSkinRingKey;
 static BOOL gGlassSkin = NO;
+static BOOL gGlowEnabled = YES;
+static BOOL gAvatarRings = YES;
 
 // Screens that must stay plain: Messages -> "pick a person" (new chat, create
 // group, share a post, quick share) and the contact list. A view is skipped
@@ -836,6 +851,7 @@ static void GGApplySkinToView(UIView *v) {
     if (rule->clearBackground) v.backgroundColor = [UIColor clearColor];
 
     if (rule->ring) {
+        if (!gAvatarRings) return;
         UIView *ring = objc_getAssociatedObject(v, kGGSkinRingKey);
         if (![ring isKindOfClass:[UIView class]]) {
             ring = [[UIView alloc] init];
@@ -1055,12 +1071,42 @@ static void GGElementHook1(id self, SEL _cmd, id arg) {
     @try { GGGrabButtonsFromElement(self); } @catch (__unused NSException *e) {}
 }
 
+// Overrides `sel` on `cls` only. If the method is inherited, class_addMethod
+// installs a local override instead of patching (and breaking) the superclass
+// for every sibling class. Returns the previous IMP.
+static IMP GGOverrideMethod(Class cls, SEL sel, IMP hook) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NULL;
+    const char *types = method_getTypeEncoding(m);
+    if (!types) return NULL;
+    IMP orig = method_getImplementation(m);
+    if (class_addMethod(cls, sel, hook, types)) return orig;  // inherited
+    Method own = class_getInstanceMethod(cls, sel);
+    if (!own) return NULL;
+    method_setImplementation(own, hook);
+    return orig;
+}
+
 static void GGHookClassSel(Class cls, SEL sel, IMP hook) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
+    const char *types = method_getTypeEncoding(m);
+    if (!types || types[0] != 'v') return;   // only void-returning methods
+    NSUInteger args = method_getNumberOfArguments(m);
+    if (args != 2 && args != 3) return;      // no params or exactly one id
     NSString *key = [NSString stringWithFormat:@"%s::%s", class_getName(cls), sel_getName(sel)];
-    gOrigMap[key] = [NSValue valueWithPointer:method_getImplementation(m)];
-    method_setImplementation(m, hook);
+    BOOL owned = NO;
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(list[i]) == sel) { owned = YES; break; }
+    }
+    free(list);
+    IMP orig = GGOverrideMethod(cls, sel, hook);
+    if (!orig) return;
+    gOrigMap[key] = [NSValue valueWithPointer:orig];
+    GGLog(@"glow: %@.%@ %@", NSStringFromClass(cls), NSStringFromSelector(sel),
+          owned ? @"patched" : @"inherited -> local override");
 }
 
 static void GGHookGlowTargets(void) {
@@ -1183,7 +1229,11 @@ static NSDictionary *GGLoadConfig(void) {
                                   @"abGlass": @YES,
                                   @"tabBarGlass": @NO,
                                   @"tabBarCapsule": @YES,
+                                  @"tabBarMoveItems": @YES,
+                                  @"tabBarDroplet": @YES,
                                   @"glassSkin": @YES,
+                                  @"glowEnabled": @YES,
+                                  @"avatarRings": @YES,
                                   @"skipScopes": GGDefaultSkinSkipScopes(),
                                   @"dumpHierarchy": @YES,
                                   @"log": @YES,
@@ -1221,7 +1271,7 @@ static void GGBootstrap(void) {
 
     UIDevice *dev = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    GGLog(@"GTokGlass 0.6 | iOS %@ | %@ | TikTok %@ (%@)",
+    GGLog(@"GTokGlass 0.7 | iOS %@ | %@ | TikTok %@ (%@)",
           dev.systemVersion, dev.model,
           info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]);
     GGLog(@"UIDesignRequiresCompatibility=%@", info[@"UIDesignRequiresCompatibility"] ?: @"<nil>");
@@ -1243,19 +1293,26 @@ static void GGBootstrap(void) {
     gTabBarGlass = [cfg[@"tabBarGlass"] boolValue];
     gTabBarCapsule = [cfg[@"tabBarCapsule"] boolValue];
     if (gTabBarCapsule) gTabBarGlass = NO;
-    GGLog(@"tab bar: capsule=%d glass=%d", (int)gTabBarCapsule, (int)gTabBarGlass);
+    gTabBarMoveItems = cfg[@"tabBarMoveItems"] ? [cfg[@"tabBarMoveItems"] boolValue] : YES;
+    gTabBarDroplet = cfg[@"tabBarDroplet"] ? [cfg[@"tabBarDroplet"] boolValue] : YES;
+    GGLog(@"tab bar: capsule=%d glass=%d move=%d droplet=%d", (int)gTabBarCapsule, (int)gTabBarGlass, (int)gTabBarMoveItems, (int)gTabBarDroplet);
     GGSetupTabBarGlass();
 
     gGlassSkin = [cfg[@"glassSkin"] boolValue];
+    gGlowEnabled = cfg[@"glowEnabled"] ? [cfg[@"glowEnabled"] boolValue] : YES;
+    gAvatarRings = cfg[@"avatarRings"] ? [cfg[@"avatarRings"] boolValue] : YES;
+    gTabBarMoveItems = cfg[@"tabBarMoveItems"] ? [cfg[@"tabBarMoveItems"] boolValue] : YES;
+    gTabBarDroplet = cfg[@"tabBarDroplet"] ? [cfg[@"tabBarDroplet"] boolValue] : YES;
     gSkinSkipScopes = [cfg[@"skipScopes"] isKindOfClass:[NSArray class]]
                           ? cfg[@"skipScopes"]
                           : GGDefaultSkinSkipScopes();
     if (gGlassSkin) {
         GGStartSkinTimer();
-        GGHookGlowTargets();
-        GGLog(@"glass skin: on (%lu rules, skip: %@)",
+        if (gGlowEnabled) GGHookGlowTargets();
+        GGLog(@"glass skin: on (%lu rules, skip: %@, glow=%d rings=%d tabMove=%d droplet=%d)",
               (unsigned long)(sizeof(gSkinRules) / sizeof(gSkinRules[0])),
-              [gSkinSkipScopes componentsJoinedByString:@", "]);
+              [gSkinSkipScopes componentsJoinedByString:@", "],
+              (int)gGlowEnabled, (int)gAvatarRings, (int)gTabBarMoveItems, (int)gTabBarDroplet);
     } else {
         GGLog(@"glass skin: off");
     }
@@ -1274,8 +1331,8 @@ static void GGBootstrap(void) {
 
     int ok = (NSClassFromString(@"_TtC12TUXSwiftBase14TUXExperiments") != Nil);
     if ([cfg[@"showStatus"] boolValue]) {
-        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.6 | flags %d | ab %d", flags, ab]
-                            : @"GTokGlass 0.6 | class not found";
+        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.7 | flags %d | ab %d", flags, ab]
+                            : @"GTokGlass 0.7 | class not found";
         GGShowStatus(text);
     }
     GGLog(@"done (entries=%d)", gEntCount);
