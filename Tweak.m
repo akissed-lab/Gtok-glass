@@ -414,7 +414,18 @@ static void GGHookButtonSetup(void) {
 #pragma mark - optional: own Liquid Glass on the custom tab bar
 
 static BOOL gTabBarGlass = NO;
+static BOOL gTabBarCapsule = NO;
 static UIView *(*gOrigTabBarLayout)(id, SEL) = NULL;
+
+// hides every stock background layer of the tab bar
+static void GGSetBarBackgroundHidden(UIView *bar) {
+    for (NSString *key in @[@"bgView", @"backgroundView", @"separatorLine"]) {
+        @try {
+            UIView *v = [bar valueForKey:key];
+            if ([v isKindOfClass:[UIView class]]) v.hidden = YES;
+        } @catch (__unused NSException *e) {}
+    }
+}
 
 static UIVisualEffect *GGGlassEffect(void) {
     // UIGlassEffect exists since iOS 26. -init alone yields an empty effect on
@@ -444,29 +455,130 @@ static void GGApplyTabBarGlass(UIView *bar) {
     }
     glass.frame = bar.bounds;
     if (!glass.superview) [bar insertSubview:glass atIndex:0];
-    for (NSString *key in @[@"bgView", @"backgroundView"]) {
-        @try {
-            UIView *v = [bar valueForKey:key];
-            if ([v isKindOfClass:[UIView class]]) v.hidden = YES;
-        } @catch (__unused NSException *e) {}
+    GGSetBarBackgroundHidden(bar);
+}
+
+#pragma mark - floating capsule tab bar
+
+// Theme-aware tint: light -> milky, dark -> smoky. Updates automatically when
+// the user switches appearance because it is a dynamic UIColor.
+static UIColor *GGCapsuleTintColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithWhite:1.0 alpha:0.06];
+        }
+        return [UIColor colorWithWhite:1.0 alpha:0.22];
+    }];
+}
+
+static void GGApplyTabBarCapsule(UIView *bar) {
+    static const void *kShadowKey = &kShadowKey;
+    static const void *kCapsuleKey = &kCapsuleKey;
+
+    GGSetBarBackgroundHidden(bar);
+    bar.backgroundColor = [UIColor clearColor];
+
+    CGFloat safeBottom = bar.safeAreaInsets.bottom;
+    CGRect b = bar.bounds;
+    CGFloat insetX = 8.0;
+    CGFloat insetY = 2.0;
+    CGFloat h = b.size.height - safeBottom - insetY * 2.0;
+    if (h < 34.0) h = 34.0;
+    CGRect capsuleRect = CGRectMake(insetX, insetY, MAX(0.0, b.size.width - insetX * 2.0), h);
+
+    UIView *shadow = objc_getAssociatedObject(bar, kShadowKey);
+    if (![shadow isKindOfClass:[UIView class]]) {
+        shadow = [[UIView alloc] init];
+        shadow.userInteractionEnabled = NO;
+        shadow.backgroundColor = [UIColor clearColor];
+        shadow.layer.shadowColor = [UIColor blackColor].CGColor;
+        shadow.layer.shadowOpacity = 0.20;
+        shadow.layer.shadowRadius = 12.0;
+        shadow.layer.shadowOffset = CGSizeMake(0, 4);
+        objc_setAssociatedObject(bar, kShadowKey, shadow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    UIVisualEffectView *capsule = objc_getAssociatedObject(bar, kCapsuleKey);
+    if (![capsule isKindOfClass:[UIVisualEffectView class]]) {
+        capsule = [[UIVisualEffectView alloc] initWithEffect:GGGlassEffect()];
+        capsule.userInteractionEnabled = NO;
+        capsule.clipsToBounds = YES;
+        capsule.layer.cornerCurve = kCACornerCurveContinuous;
+        UIView *tint = [[UIView alloc] init];
+        tint.userInteractionEnabled = NO;
+        tint.tag = 0x6766;
+        tint.backgroundColor = GGCapsuleTintColor();
+        [capsule.contentView addSubview:tint];
+        objc_setAssociatedObject(bar, kCapsuleKey, capsule, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    shadow.frame = capsuleRect;
+    capsule.frame = shadow.bounds;
+    capsule.layer.cornerRadius = capsuleRect.size.height / 2.0;
+    UIView *tint = [capsule.contentView viewWithTag:0x6766];
+    tint.frame = capsule.contentView.bounds;
+
+    if (shadow.superview != bar) [bar insertSubview:shadow atIndex:0];
+    if (capsule.superview != shadow) [shadow addSubview:capsule];
+
+    // distribute the tab items inside the capsule so nothing sits outside it
+    NSArray *buttons = nil;
+    @try { buttons = [bar valueForKey:@"buttons"]; } @catch (__unused NSException *e) {}
+    if ([buttons isKindOfClass:[NSArray class]] && buttons.count > 0) {
+        CGFloat bw = capsuleRect.size.width / (CGFloat)buttons.count;
+        for (NSUInteger i = 0; i < buttons.count; i++) {
+            id item = buttons[i];
+            if (![item isKindOfClass:[UIView class]]) continue;
+            UIView *btn = (UIView *)item;
+            UIView *host = btn.superview ?: bar;
+            CGRect slot = [bar convertRect:CGRectMake(capsuleRect.origin.x + bw * (CGFloat)i,
+                                                      capsuleRect.origin.y,
+                                                      bw,
+                                                      capsuleRect.size.height)
+                                    toView:host];
+            CGRect f = btn.frame;
+            f.origin.x = slot.origin.x;
+            f.origin.y = slot.origin.y;
+            f.size.width = slot.size.width;
+            f.size.height = slot.size.height;
+            btn.frame = f;
+        }
     }
 }
 
 static void GGReplacementTabBarLayout(id self, SEL _cmd) {
     if (gOrigTabBarLayout) gOrigTabBarLayout(self, _cmd);
-    @try { GGApplyTabBarGlass((UIView *)self); } @catch (__unused NSException *e) {}
+    @try {
+        if (gTabBarCapsule) GGApplyTabBarCapsule((UIView *)self);
+        else if (gTabBarGlass) GGApplyTabBarGlass((UIView *)self);
+    } @catch (__unused NSException *e) {}
 }
 
+// When the capsule is on, the controller keeps pushing the stock background
+// alpha/colour around while scrolling. Swallow those calls.
+static void GGNoop(id self, SEL _cmd) { (void)self; (void)_cmd; }
+
 static void GGSetupTabBarGlass(void) {
-    if (!gTabBarGlass) return;
+    if (!gTabBarGlass && !gTabBarCapsule) return;
     Class cls = GGClassWithSuffix(@"TTKTabBar");
     if (!cls) { GGLog(@"TTKTabBar: class NOT found"); return; }
+
+    if (gTabBarCapsule) {
+        for (NSString *name in @[@"updateBackgroundAlpha:",
+                                 @"updateCompactTabBarBackgroundAlpha:",
+                                 @"updateBackgroundColor:"]) {
+            SEL s = sel_registerName(name.UTF8String);
+            Method mm = class_getInstanceMethod(cls, s);
+            if (mm) method_setImplementation(mm, (IMP)GGNoop);
+        }
+    }
+
     SEL sel = sel_registerName("layoutSubviews");
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
     gOrigTabBarLayout = (UIView *(*)(id, SEL))method_getImplementation(m);
     method_setImplementation(m, (IMP)GGReplacementTabBarLayout);
-    GGLog(@"TTKTabBar: own glass background enabled");
+    GGLog(@"TTKTabBar: %@ enabled", gTabBarCapsule ? @"capsule mode" : @"own glass background");
 }
 
 #pragma mark - status capsule (visible proof that the tweak is alive)
@@ -531,6 +643,7 @@ static NSDictionary *GGLoadConfig(void) {
                                   @"nativeGlass": @YES,
                                   @"abGlass": @YES,
                                   @"tabBarGlass": @NO,
+                                  @"tabBarCapsule": @YES,
                                   @"log": @YES,
                                   @"showStatus": @YES} mutableCopy];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -566,7 +679,7 @@ static void GGBootstrap(void) {
 
     UIDevice *dev = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    GGLog(@"GTokGlass 0.2 | iOS %@ | %@ | TikTok %@ (%@)",
+    GGLog(@"GTokGlass 0.3 | iOS %@ | %@ | TikTok %@ (%@)",
           dev.systemVersion, dev.model,
           info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]);
     GGLog(@"UIDesignRequiresCompatibility=%@", info[@"UIDesignRequiresCompatibility"] ?: @"<nil>");
@@ -586,12 +699,15 @@ static void GGBootstrap(void) {
     }
 
     gTabBarGlass = [cfg[@"tabBarGlass"] boolValue];
+    gTabBarCapsule = [cfg[@"tabBarCapsule"] boolValue];
+    if (gTabBarCapsule) gTabBarGlass = NO;
+    GGLog(@"tab bar: capsule=%d glass=%d", (int)gTabBarCapsule, (int)gTabBarGlass);
     GGSetupTabBarGlass();
 
     int ok = (NSClassFromString(@"_TtC12TUXSwiftBase14TUXExperiments") != Nil);
     if ([cfg[@"showStatus"] boolValue]) {
-        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.2 | flags %d | ab %d", flags, ab]
-                            : @"GTokGlass 0.2 | class not found";
+        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.3 | flags %d | ab %d", flags, ab]
+                            : @"GTokGlass 0.3 | class not found";
         GGShowStatus(text);
     }
     GGLog(@"done (entries=%d)", gEntCount);
