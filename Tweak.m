@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <dispatch/dispatch.h>
 #import <pthread.h>
 
 #pragma mark - config / log
@@ -581,6 +582,172 @@ static void GGSetupTabBarGlass(void) {
     GGLog(@"TTKTabBar: %@ enabled", gTabBarCapsule ? @"capsule mode" : @"own glass background");
 }
 
+#pragma mark - universal glass skin (v0.4)
+
+// A small rule table: any view whose class name ends with `cls` gets a glass
+// plate behind its content. radius < 0 means "pill" (height / 2).
+typedef struct {
+    const char *cls;
+    CGFloat insetX;
+    CGFloat insetY;
+    CGFloat radius;
+    BOOL clearBackground;
+} GGSkinRule;
+
+static GGSkinRule gSkinRules[] = {
+    // top feed tabs ("For You" / "Following" / ...)
+    {"TikTokFeedTabControl",           8.0, 2.0, -1.0, YES},
+    // messages: filter tab bar
+    {"TTKInboxTabBarView",             8.0, 4.0, -1.0, YES},
+    // profile tabs (videos / reposts / likes)
+    {"TTKProfileTabBarView",           8.0, 4.0, -1.0, YES},
+    // comment sheet tabs
+    {"TTKCommentHeaderTabView",        8.0, 2.0, -1.0, YES},
+    // one chat row in the inbox
+    {"AWEIMChatListCellContainerView", 0.0, 0.0, 18.0, NO},
+    // search entry points
+    {"TTKFeedDetailSearchButton",      0.0, 0.0, -1.0, NO},
+    {"TTKFeedTabCornerSearchItem",     0.0, 0.0, -1.0, NO},
+    {"TTKFeedTabCornerSearchBarItem",  0.0, 0.0, -1.0, NO},
+    {"AWECommonSearchBar",             2.0, 2.0, -1.0, NO},
+    {"AWESearchBar",                   2.0, 2.0, -1.0, NO},
+};
+
+static const void *kGGSkinGlassKey = &kGGSkinGlassKey;
+static BOOL gGlassSkin = NO;
+
+static const GGSkinRule *GGRuleForView(UIView *v) {
+    NSString *name = NSStringFromClass([v class]);
+    if (name.length == 0) return NULL;
+    for (size_t i = 0; i < sizeof(gSkinRules) / sizeof(gSkinRules[0]); i++) {
+        if ([name hasSuffix:[NSString stringWithUTF8String:gSkinRules[i].cls]]) {
+            return &gSkinRules[i];
+        }
+    }
+    return NULL;
+}
+
+static void GGApplySkinToView(UIView *v) {
+    if (!v) return;
+    if ([v isKindOfClass:[UIVisualEffectView class]]) return;
+    CGRect b = v.bounds;
+    if (b.size.width < 8.0 || b.size.height < 8.0) return;
+
+    const GGSkinRule *rule = GGRuleForView(v);
+    if (!rule) return;
+
+    if (rule->clearBackground) v.backgroundColor = [UIColor clearColor];
+
+    UIVisualEffectView *glass = objc_getAssociatedObject(v, kGGSkinGlassKey);
+    if (![glass isKindOfClass:[UIVisualEffectView class]]) {
+        glass = [[UIVisualEffectView alloc] initWithEffect:GGGlassEffect()];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        UIView *tint = [[UIView alloc] init];
+        tint.userInteractionEnabled = NO;
+        tint.tag = 0x6767;
+        tint.backgroundColor = GGCapsuleTintColor();
+        [glass.contentView addSubview:tint];
+        objc_setAssociatedObject(v, kGGSkinGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    CGRect r = CGRectInset(b, rule->insetX, rule->insetY);
+    if (r.size.width < 4.0 || r.size.height < 4.0) return;
+    glass.frame = r;
+    glass.layer.cornerRadius = rule->radius < 0.0 ? r.size.height / 2.0 : rule->radius;
+    UIView *tint = [glass.contentView viewWithTag:0x6767];
+    tint.frame = glass.contentView.bounds;
+    if (glass.superview != v) [v insertSubview:glass atIndex:0];
+}
+
+static void GGWalkAndSkin(UIView *root) {
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger visited = 0;
+    while (stack.count > 0 && visited < 4000) {
+        UIView *v = [stack lastObject];
+        [stack removeLastObject];
+        visited++;
+        @try { GGApplySkinToView(v); } @catch (__unused NSException *e) {}
+        NSArray *subs = v.subviews;
+        for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
+            UIView *s = subs[(NSUInteger)i];
+            if ([s isKindOfClass:[UIVisualEffectView class]]) continue;
+            if (s.hidden || s.alpha < 0.01) continue;
+            [stack addObject:s];
+            if (stack.count > 4000) break;
+        }
+    }
+}
+
+static UIWindow *GGKeyWindow(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) return w;
+        }
+    }
+    UIWindow *fallback = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isKeyWindow) return w;
+        if (!fallback && w.windowLevel == UIWindowLevelNormal) fallback = w;
+    }
+    return fallback;
+}
+
+static dispatch_source_t gSkinTimer = NULL;
+
+static void GGStartSkinTimer(void) {
+    if (gSkinTimer) return;
+    gSkinTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(gSkinTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                              (uint64_t)(1.2 * NSEC_PER_SEC),
+                              (uint64_t)(0.2 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(gSkinTimer, ^{
+        @autoreleasepool {
+            if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+            UIWindow *w = GGKeyWindow();
+            if (!w) return;
+            @try { GGWalkAndSkin(w); } @catch (__unused NSException *e) {}
+        }
+    });
+    dispatch_resume(gSkinTimer);
+}
+
+#pragma mark - hierarchy dump (discovery of unknown Swift classes)
+
+static void GGDumpHierarchy(NSString *tag) {
+    UIWindow *w = GGKeyWindow();
+    if (!w) { GGLog(@"dump %@: no window", tag); return; }
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"GTokGlass hierarchy (%@) iOS %@\n", tag, [UIDevice currentDevice].systemVersion];
+
+    NSMutableArray *queue = [NSMutableArray array];
+    [queue addObject:@[w, @0]];
+    NSUInteger idx = 0;
+    NSInteger budget = 6000;
+    while (idx < queue.count && budget-- > 0 && out.length < 900000) {
+        NSArray *pair = queue[idx++];
+        UIView *v = pair[0];
+        NSInteger depth = [pair[1] integerValue];
+        CGRect f = [w convertRect:v.bounds fromView:v];
+        [out appendFormat:@"%*s%@  (%.0f,%.0f %.0fx%.0f)%@%@\n",
+         (int)(depth * 2), "", NSStringFromClass([v class]),
+         f.origin.x, f.origin.y, f.size.width, f.size.height,
+         v.hidden ? @" hidden" : @"",
+         v.alpha < 0.99 ? [NSString stringWithFormat:@" alpha=%.2f", v.alpha] : @""];
+        if (depth >= 14) continue;
+        for (UIView *s in v.subviews) [queue addObject:@[s, @(depth + 1)]];
+    }
+
+    NSString *path = [GGDir() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"hierarchy_%@.txt", tag]];
+    [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    GGLog(@"hierarchy dump -> %@ (%lu views)", path.lastPathComponent, (unsigned long)queue.count);
+}
+
 #pragma mark - status capsule (visible proof that the tweak is alive)
 
 static void GGShowStatus(NSString *text) {
@@ -644,6 +811,8 @@ static NSDictionary *GGLoadConfig(void) {
                                   @"abGlass": @YES,
                                   @"tabBarGlass": @NO,
                                   @"tabBarCapsule": @YES,
+                                  @"glassSkin": @YES,
+                                  @"dumpHierarchy": @YES,
                                   @"log": @YES,
                                   @"showStatus": @YES} mutableCopy];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -679,7 +848,7 @@ static void GGBootstrap(void) {
 
     UIDevice *dev = [UIDevice currentDevice];
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    GGLog(@"GTokGlass 0.3 | iOS %@ | %@ | TikTok %@ (%@)",
+    GGLog(@"GTokGlass 0.4 | iOS %@ | %@ | TikTok %@ (%@)",
           dev.systemVersion, dev.model,
           info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]);
     GGLog(@"UIDesignRequiresCompatibility=%@", info[@"UIDesignRequiresCompatibility"] ?: @"<nil>");
@@ -704,10 +873,30 @@ static void GGBootstrap(void) {
     GGLog(@"tab bar: capsule=%d glass=%d", (int)gTabBarCapsule, (int)gTabBarGlass);
     GGSetupTabBarGlass();
 
+    gGlassSkin = [cfg[@"glassSkin"] boolValue];
+    if (gGlassSkin) {
+        GGStartSkinTimer();
+        GGLog(@"glass skin: on (%lu rules)", (unsigned long)(sizeof(gSkinRules) / sizeof(gSkinRules[0])));
+    } else {
+        GGLog(@"glass skin: off");
+    }
+
+    if ([cfg[@"dumpHierarchy"] boolValue]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ GGDumpHierarchy(@"start"); });
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(__unused NSNotification *note) {
+            GGDumpHierarchy(@"bg");
+        }];
+        GGLog(@"hierarchy dump: armed (start + background)");
+    }
+
     int ok = (NSClassFromString(@"_TtC12TUXSwiftBase14TUXExperiments") != Nil);
     if ([cfg[@"showStatus"] boolValue]) {
-        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.3 | flags %d | ab %d", flags, ab]
-                            : @"GTokGlass 0.3 | class not found";
+        NSString *text = ok ? [NSString stringWithFormat:@"GTokGlass 0.4 | flags %d | ab %d", flags, ab]
+                            : @"GTokGlass 0.4 | class not found";
         GGShowStatus(text);
     }
     GGLog(@"done (entries=%d)", gEntCount);
